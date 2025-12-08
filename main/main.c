@@ -104,7 +104,7 @@ static void led_pulse(uint8_t times, uint32_t pulse_duration_ms, uint8_t brightn
 static const char* TAG = "LED_STRIP_CTRL";
 
 esp_log_level_set(TAG, ESP_LOG_INFO);
-LOGI(TAG, "ESP32 Xmas Lightstrip Controller started");
+ESP_LOGI(TAG, "ESP32 Xmas Lightstrip Controller started");
 
 void app_main(void)
 {
