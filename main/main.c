@@ -5,9 +5,16 @@
 #include "esp_log.h" // logging
 #include "nvs_flash.h"
 #include "nvs.h" // NVS
+#include "iot_button.h" // button library
 
+// defines
+#define LONG_PRESS_TIME_MS 800
+#define SHORT_PRESS_TIME_MS 200
+#define BUTTON_GPIO 9
 
+// global variables
 uint8_t led_brightness = 0; // Helligkeit von 0 bis 255
+static const char* TAG = "LED_STRIP_CTRL";
 
 // declare functions
 static void led_init(void);
@@ -16,6 +23,17 @@ static void led_blink(uint8_t times, uint32_t period_ms);
 static void led_fade_off(uint32_t duration_ms);
 static void led_fade_on(uint32_t duration_ms, uint8_t target_brightness);
 static void led_pulse(uint8_t times, uint32_t pulse_duration_ms, uint8_t brightness);
+static button_handle_t init_button(void);
+static void on_single_click(void *arg, void *usr_data);
+static void on_button_press_repeat(void *arg, void *usr_data);
+static void on_press_repeat_done(void *arg, void *usr_data);
+static void on_double_click(void *arg, void *usr_data);
+static void on_multiple_click(void *arg, void *usr_data);
+static void on_long_press_start(void *arg, void *usr_data);
+static void on_long_press_hold(void *arg, void *usr_data);
+static void on_long_press_up(void *arg, void *usr_data);
+static void on_button_press_down(void *arg, void *usr_data);
+static void on_button_press_up(void *arg, void *usr_data);
 
 //-------------------------------------------------------------------------------//
 // LED functions
@@ -101,10 +119,279 @@ static void led_pulse(uint8_t times, uint32_t pulse_duration_ms, uint8_t brightn
 
 
 //-------------------------------------------------------------------------------//
-// MAIN
+// BUTTON functions
 //-------------------------------------------------------------------------------//
 
-static const char* TAG = "LED_STRIP_CTRL";
+/**
+ * @brief Initialisiert den Button mit allen Event-Handlern
+ * @return Button-Handle oder NULL bei Fehler
+ */
+static button_handle_t init_button(void)
+{
+    // Button-Konfiguration
+    button_config_t btn_cfg = {
+        .type = BUTTON_TYPE_GPIO,
+        .long_press_time = LONG_PRESS_TIME_MS,
+        .short_press_time = SHORT_PRESS_TIME_MS,
+        .gpio_button_config = {
+            .gpio_num = BUTTON_GPIO,
+            .active_level = 0,  // Active LOW (Button verbindet GPIO mit GND)
+        },
+    };
+    
+    // Button erstellen
+    button_handle_t btn = iot_button_create(&btn_cfg);
+    if (btn == NULL) {
+        ESP_LOGE(TAG, "Fehler beim Erstellen des Buttons!");
+        return NULL;
+    }
+    ESP_LOGI(TAG, "Button auf GPIO %d erstellt", BUTTON_GPIO);
+    
+    // Event-Handler registrieren
+    esp_err_t ret;
+    
+    // Einfach-Klick
+    ret = iot_button_register_cb(btn, BUTTON_SINGLE_CLICK, on_single_click, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Fehler beim Registrieren von SINGLE_CLICK: %s", esp_err_to_name(ret));
+    }
+    
+/*
+    // WHILE repeated clicks
+    ret = iot_button_register_cb(btn, BUTTON_PRESS_REPEAT,  on_button_press_repeat, (void*)btn);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Fehler beim Registrieren von PRESS_REPEAT: %s", esp_err_to_name(ret));
+    }
+*/
+
+    // AFTER repeated clicks
+    ret = iot_button_register_cb(btn, BUTTON_PRESS_REPEAT_DONE,  on_press_repeat_done, (void*)btn);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Fehler beim Registrieren von PRESS_REPEAT_DONE: %s", esp_err_to_name(ret));
+    }
+
+/*
+    // Doppel-Klick
+    ret = iot_button_register_cb(btn, BUTTON_DOUBLE_CLICK, on_double_click, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Fehler beim Registrieren von DOUBLE_CLICK: %s", esp_err_to_name(ret));
+    }
+*/
+
+/*
+    // Multiple clicks (2 or more)
+    ret = iot_button_register_cb(btn, BUTTON_MULTIPLE_CLICK, on_multiple_click, (void*)btn);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Fehler beim Registrieren von MULTIPLE_CLICK: %s", esp_err_to_name(ret));
+    }
+*/
+
+    // Langer Druck - Start
+    ret = iot_button_register_cb(btn, BUTTON_LONG_PRESS_START, on_long_press_start, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Fehler beim Registrieren von LONG_PRESS_START: %s", esp_err_to_name(ret));
+    }
+    
+    // Langer Druck - Halten
+    ret = iot_button_register_cb(btn, BUTTON_LONG_PRESS_HOLD, on_long_press_hold, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Fehler beim Registrieren von LONG_PRESS_HOLD: %s", esp_err_to_name(ret));
+    }
+    
+    // Langer Druck - Ende
+    ret = iot_button_register_cb(btn, BUTTON_LONG_PRESS_UP, on_long_press_up, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Fehler beim Registrieren von LONG_PRESS_UP: %s", esp_err_to_name(ret));
+    }
+    
+    // Optional: Press Down/Up Events für Debugging
+    iot_button_register_cb(btn, BUTTON_PRESS_DOWN, on_button_press_down, NULL);
+    iot_button_register_cb(btn, BUTTON_PRESS_UP, on_button_press_up, NULL);
+    
+    ESP_LOGI(TAG, "Alle Event-Handler registriert");
+    
+    return btn;
+}
+
+// ============================================================================
+// CALLBACK-FUNKTIONEN
+// ============================================================================
+
+/**
+ * @brief Callback für Einfach-Klick
+ */
+static void on_single_click(void *arg, void *usr_data)
+{
+    ESP_LOGI(TAG, "╔════════════════════════════╗");
+    ESP_LOGI(TAG, "║   EINFACH-KLICK erkannt!   ║");
+    ESP_LOGI(TAG, "╚════════════════════════════╝");
+    
+    // Hier deine Aktion für Einfach-Klick
+    // Beispiel: LED umschalten, Modus ändern, etc.
+}
+
+/**
+ * @brief Universeller Click-Handler mit BUTTON_PRESS_REPEAT
+ * Dieser Event wird bei jedem Button-Release getriggert und enthält
+ * die Anzahl der Klicks in button_event_data_t
+ */
+static void on_button_press_repeat(void *arg, void *usr_data)
+{
+    button_handle_t btn = (button_handle_t)arg;
+    
+    // WICHTIG: Bei PRESS_REPEAT bekommen wir die Klick-Anzahl über get_repeat()
+    int click_count = iot_button_get_repeat(btn);
+    if (click_count < 2) {
+        return;
+    }
+    ESP_LOGI(TAG, "%d KLICKS erkannt!", click_count);
+    switch (click_count) {
+        case 1:
+            ESP_LOGI(TAG, "EINFACH-KLICK erkannt!");
+            break;
+            
+        case 2:
+            ESP_LOGI(TAG, "DOPPEL-KLICK erkannt!");
+            break;
+            
+        case 3:
+            ESP_LOGI(TAG, "DREIFACH-KLICK erkannt!");
+            break;
+            
+        default:
+            ESP_LOGI(TAG, "%d-FACH-KLICK erkannt!", click_count);
+            break;
+    }
+}
+
+/**
+ * @brief Handler für BUTTON_PRESS_REPEAT_DONE
+ * 
+ * WICHTIG: Dieser Event wird nur EINMAL ausgelöst, nachdem die
+ * gesamte Klick-Serie abgeschlossen ist!
+ */
+static void on_press_repeat_done(void *arg, void *usr_data)
+{
+    button_handle_t btn = (button_handle_t)arg;
+    
+    // Anzahl der Klicks in der Serie abrufen
+    int click_count = iot_button_get_repeat(btn);
+    
+    ESP_LOGI(TAG, "PRESS_REPEAT_DONE: Finale Klick-Serie mit %d Klick(s)", click_count);
+    
+    // Jetzt die verschiedenen Klick-Typen unterscheiden
+    switch (click_count) {
+        case 1:
+            ESP_LOGI(TAG, "╔════════════════════════════╗");
+            ESP_LOGI(TAG, "║   EINFACH-KLICK erkannt!   ║");
+            ESP_LOGI(TAG, "╚════════════════════════════╝");
+            // Hier deine Aktion für Einfach-Klick
+            break;
+            
+        case 2:
+            ESP_LOGI(TAG, "╔════════════════════════════╗");
+            ESP_LOGI(TAG, "║   DOPPEL-KLICK erkannt!    ║");
+            ESP_LOGI(TAG, "╚════════════════════════════╝");
+            // Hier deine Aktion für Doppel-Klick
+            break;
+            
+        case 3:
+            ESP_LOGI(TAG, "╔════════════════════════════╗");
+            ESP_LOGI(TAG, "║  DREIFACH-KLICK erkannt!   ║");
+            ESP_LOGI(TAG, "╚════════════════════════════╝");
+            // Hier deine Aktion für Dreifach-Klick
+            break;
+            
+        case 4:
+            ESP_LOGI(TAG, "╔════════════════════════════╗");
+            ESP_LOGI(TAG, "║  VIERFACH-KLICK erkannt!   ║");
+            ESP_LOGI(TAG, "╚════════════════════════════╝");
+            // Hier deine Aktion für Vierfach-Klick
+            break;
+            
+        default:
+            // Für 5+ Klicks
+            ESP_LOGI(TAG, "╔════════════════════════════╗");
+            ESP_LOGI(TAG, "║   %d-FACH-KLICK erkannt!    ║", click_count);
+            ESP_LOGI(TAG, "╚════════════════════════════╝");
+            // Hier deine Aktion für mehr Klicks
+            break;
+    }
+}
+
+/**
+ * @brief Callback für Doppel-Klick
+ */
+static void on_double_click(void *arg, void *usr_data)
+{
+    ESP_LOGI(TAG, "╔════════════════════════════╗");
+    ESP_LOGI(TAG, "║   DOPPEL-KLICK erkannt!    ║");
+    ESP_LOGI(TAG, "╚════════════════════════════╝");
+}
+
+/**
+ * @brief Callback für 5-fach Klick oder mehr
+ */
+static void on_multiple_click(void *arg, void *usr_data)
+{
+    button_handle_t btn = (button_handle_t)arg;
+    
+    // Anzahl der Klicks ermitteln
+    int click_count = iot_button_get_repeat(btn);
+    
+    ESP_LOGI(TAG, "╔════════════════════════════╗");
+    ESP_LOGI(TAG, "║   %d-FACH-KLICK erkannt!    ║", click_count);
+    ESP_LOGI(TAG, "╚════════════════════════════╝");
+}
+
+/**
+ * @brief Callback wenn langer Druck beginnt
+ */
+static void on_long_press_start(void *arg, void *usr_data)
+{
+    ESP_LOGI(TAG, "╔════════════════════════════╗");
+    ESP_LOGI(TAG, "║  LANGER DRUCK gestartet!   ║");
+    ESP_LOGI(TAG, "╚════════════════════════════╝");
+}
+
+/**
+ * @brief Callback während Button gehalten wird (wiederholt sich)
+ */
+static void on_long_press_hold(void *arg, void *usr_data)
+{
+    ESP_LOGI(TAG, "⏳ Langer Druck wird gehalten...");
+    
+    // Wird alle 500ms aufgerufen während Button gedrückt bleibt
+    // Nützlich für kontinuierliche Aktionen
+}
+
+/**
+ * @brief Callback wenn langer Druck endet
+ */
+static void on_long_press_up(void *arg, void *usr_data)
+{
+    ESP_LOGI(TAG, "✓ Langer Druck beendet");
+}
+
+/**
+ * @brief Callback für Button gedrückt (optional)
+ */
+static void on_button_press_down(void *arg, void *usr_data)
+{
+    ESP_LOGD(TAG, "↓ Button gedrückt");
+}
+
+/**
+ * @brief Callback für Button losgelassen (optional)
+ */
+static void on_button_press_up(void *arg, void *usr_data)
+{
+    ESP_LOGD(TAG, "↑ Button losgelassen");
+}
+
+//-------------------------------------------------------------------------------//
+// MAIN
+//-------------------------------------------------------------------------------//
 
 void app_main(void)
 {
@@ -115,6 +402,7 @@ void app_main(void)
     // do inits
     nvs_flash_init();
     led_init();
+    init_button();
 
     // open NVS storage
     nvs_handle_t handle;
