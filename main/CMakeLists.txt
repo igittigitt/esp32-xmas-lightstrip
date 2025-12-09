@@ -5,4 +5,5 @@ idf_component_register(
         "."
    REQUIRES 
         esp_driver_ledc
+        nvs_flash
 )

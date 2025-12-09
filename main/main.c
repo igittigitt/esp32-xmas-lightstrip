@@ -3,6 +3,9 @@
 #include "freertos/FreeRTOS.h" // used for pdMS_TO_TICKS
 #include "freertos/task.h" // used for vTaskDelay
 #include "esp_log.h" // logging
+#include "nvs_flash.h"
+#include "nvs.h" // NVS
+
 
 uint8_t led_brightness = 0; // Helligkeit von 0 bis 255
 
@@ -105,13 +108,32 @@ static const char* TAG = "LED_STRIP_CTRL";
 
 void app_main(void)
 {
+    // set loglevel
     esp_log_level_set(TAG, ESP_LOG_INFO);
     ESP_LOGI(TAG, "ESP32 Xmas Lightstrip Controller started");
 
+    // do inits
+    nvs_flash_init();
     led_init();
+
+    // open NVS storage
+    nvs_handle_t handle;
+    nvs_open("storage", NVS_READWRITE, &handle);
+
+    // restore led brightness from flash
+    nvs_get_u8(handle, "led_brightness", &led_brightness);
+    led_set_brightness(led_brightness);
+    ESP_LOGI(TAG, "Restored LED brightness from Flash: %u", led_brightness);
+
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
     led_set_brightness(20); // 20% Helligkeit
     led_blink(10, 500); // 10 mal blinken mit 500ms Intervall
     led_set_brightness(100); // 100% Helligkeit
     led_blink(10, 250); // 10 mal blinken mit 500ms Intervall
+
+    // store final brightness to flash
+    nvs_set_u8(handle, "led_brightness", 50);
+    nvs_commit(handle);
+    ESP_LOGI(TAG, "Stored LED brightness into Flash: %u", 50);
 }
