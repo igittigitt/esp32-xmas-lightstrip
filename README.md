@@ -5,7 +5,15 @@ The purpose of this project is to get familar with ESP32(-H2) programming and co
 # Changelog
 
 - setup emtpy project
-- adding LED PWM control code to setup LEDC and set brightness
-- adding FreeRTOS component for multitasking
-- adding NVS component for Flash persistence
-- adding iot_button component for button "gestures" detection
+- added LED PWM control code to setup LEDC and set brightness
+- added FreeRTOS component for multitasking
+- added NVS component for Flash persistence
+- added iot_button component for button "gestures" detection
+- added state machine code
+- added support for DS3231 RTC
+
+# Business logic
+
+- After first poweron, default values will be loaded (LED=OFF, Timer=NONE, Status=OFF)
+- After powerloss/battery-change, last status restored from NVS
+- In OFF mode press button 

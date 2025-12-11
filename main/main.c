@@ -6,16 +6,23 @@
 #include "nvs_flash.h"
 #include "nvs.h" // NVS
 #include "iot_button.h" // button library
+#include "i2cdev.h" // I2C
+#include "ds3231.h" // DS3231 RTC (I2C realtime clock)
 
 //-------------------------------------------------------------------------------//
 // defines
 //-------------------------------------------------------------------------------//
 
+#define BUTTON_GPIO 9
 #define LONG_PRESS_TIME_MS 800
 #define SHORT_PRESS_TIME_MS 200
-#define BUTTON_GPIO 9
+
 #define LED_DIM_DIRECTION_UP true
 #define LED_DIM_DIRECTION_DOWN false
+
+#define I2C_MASTER_SCL_IO GPIO_NUM_2
+#define I2C_MASTER_SDA_IO GPIO_NUM_1
+#define I2C_MASTER_NUM I2C_NUM_0
 
 //-------------------------------------------------------------------------------//
 // declare types
@@ -25,14 +32,9 @@
 typedef enum {
     STATE_OFF = 0,
     STATE_TIMER_RUN,
-    STATE_TIMER_PROGRAM_ON,
-    STATE_TIMER_PROGRAM_OFF,
-    STATE_TIMER_ERASE,
-    STATE_LED_DIM_UP,
-    STATE_LED_DIM_DOWN,
-    STATE_LED_FADE_UP,
-    STATE_LED_FADE_DOWN,
-    STATE_STORE_BRIGHTNESS,
+    STATE_TIMER_RUN_BRIGHTNESS,
+    STATE_TIMER_PROGRAM,
+    STATE_TIMER_PROGRAM_BRIGHTNESS,
     STATE_MAX
 } state_machine_state_t;
 
@@ -41,8 +43,8 @@ typedef enum {
     BTN_EVENT_SINGLE_CLICK,
     BTN_EVENT_DOUBLE_CLICK,
     BTN_EVENT_LONG_CLICK,
-    BTN_EVENT_HOLD,
-    BTN_EVENT_BUTTON_RELEASED
+    BTN_EVENT_LONG_CLICK_START,
+    BTN_EVENT_LONG_CLICK_END
 } state_machine_button_event_t;
 
 //-------------------------------------------------------------------------------//
@@ -58,13 +60,9 @@ static state_machine_state_t current_state = STATE_OFF;
 static const char* state_names[] = {
     "OFF",
     "TIMER_RUN",
-    "TIMER_PROGRAM_ON",
-    "TIMER_PROGRAM_OFF",
-    "LED_DIM_UP",
-    "LED_DIM_DOWN",
-    "LED_FADE_UP",
-    "LED_FADE_DOWN",
-    "STORE_BRIGHTNESS"
+    "TIMER_RUN_BRIGHTNESS",
+    "TIMER_PROGRAM",
+    "TIMER_PROGRAM_BRIGHTNESS"
 };
 
 //-------------------------------------------------------------------------------//
@@ -90,15 +88,15 @@ static void on_button_press_up(void *arg, void *usr_data);
 
 // State Machine
 void state_machine_init(void);
-void state_machine_transition(state_machine_state_t new_state);
+void state_machine_transition(state_machine_state_t new_state, state_machine_button_event_t event);
 state_machine_state_t state_machine_get_current(void);
 void state_machine_handle_button_event(state_machine_button_event_t event);
-static void on_state_enter_off(state_machine_state_t from_state);
-static void on_state_enter_timer_run(state_machine_state_t from_state);
-static void on_state_enter_timer_program_on(state_machine_state_t from_state);
-static void on_state_enter_timer_program_off(state_machine_state_t from_state);
-static void on_state_enter_timer_erase(state_machine_state_t from_state);
-static void on_state_enter_dim_up(state_machine_state_t from_state);
+static void on_state_enter_off(state_machine_state_t from_state, state_machine_button_event_t event);
+static void on_state_exit_off(state_machine_state_t from_state, state_machine_button_event_t event);
+static void on_state_enter_timer_run(state_machine_state_t from_state, state_machine_button_event_t event);
+static void on_state_enter_timer_run_brightness(state_machine_state_t from_state, state_machine_button_event_t event);
+static void on_state_enter_timer_program(state_machine_state_t from_state, state_machine_button_event_t event);
+static void on_state_enter_timer_program_brightness(state_machine_state_t from_state, state_machine_button_event_t event);
 
 //-------------------------------------------------------------------------------//
 // LED functions
@@ -292,8 +290,7 @@ static void on_press_repeat_done(void *arg, void *usr_data)
 static void on_long_press_start(void *arg, void *usr_data)
 {
     ESP_LOGI(TAG, "LANGER DRUCK gestartet!");
-
-    state_machine_handle_button_event(BTN_EVENT_LONG_CLICK);
+    state_machine_handle_button_event(BTN_EVENT_LONG_CLICK_START);
 }
 
 /**
@@ -313,6 +310,7 @@ static void on_long_press_hold(void *arg, void *usr_data)
 static void on_long_press_up(void *arg, void *usr_data)
 {
     ESP_LOGI(TAG, "LANGER DRUCK beendet");
+    state_machine_handle_button_event(BTN_EVENT_LONG_CLICK_END);
 }
 
 /**
@@ -345,7 +343,7 @@ void state_machine_init(void)
     ESP_LOGI(TAG, "State machine initialized to: %s", state_names[current_state]);
 }
 
-void state_machine_transition(state_machine_state_t new_state)
+void state_machine_transition(state_machine_state_t new_state, state_machine_button_event_t event)
 {
     if (new_state >= STATE_MAX) {
         ESP_LOGE(TAG, "Invalid state: %d", new_state);
@@ -356,26 +354,49 @@ void state_machine_transition(state_machine_state_t new_state)
     current_state = new_state;
     ESP_LOGI(TAG, "State transition: %s -> %s", state_names[old_state], state_names[new_state]);
     
-    switch(new_state) {
+    // call state exit-handlers
+    switch(old_state) {
         case STATE_OFF:
-            on_state_enter_off(old_state);
+            on_state_exit_off(new_state, event);
             break;
         case STATE_TIMER_RUN:
-            on_state_enter_timer_run(old_state);
+            //on_state_exit_timer_run(new_state, event);
             break;
-        case STATE_TIMER_PROGRAM_ON:
-            on_state_enter_timer_program_on(old_state);
+        case STATE_TIMER_RUN_BRIGHTNESS:
+            //on_state_exit_timer_run(new_state, event);
             break;
-        case STATE_TIMER_PROGRAM_OFF:
-            on_state_enter_timer_program_off(old_state);
+        case STATE_TIMER_PROGRAM:
+            //on_state_exit_timer_program_on(new_state, event);
             break;
-        case STATE_TIMER_ERASE:
-            on_state_enter_timer_erase(old_state);
-            break;
-        case STATE_LED_DIM_UP:
-            on_state_enter_dim_up(old_state);
+        case STATE_TIMER_PROGRAM_BRIGHTNESS:
+            //on_state_exit_timer_program_off(new_state, event);
             break;
 
+        // ... weitere Cases
+
+        default:
+            ESP_LOGE(TAG, "Unhandled state transistion: %d -> %d", old_state, new_state);
+            return;
+    }
+
+    // call state entry-handlers
+    switch(new_state) {
+        case STATE_OFF:
+            on_state_enter_off(old_state, event);
+            break;
+        case STATE_TIMER_RUN:
+            on_state_enter_timer_run(old_state, event);
+            break;
+        case STATE_TIMER_RUN_BRIGHTNESS:
+            on_state_enter_timer_run_brightness(old_state, event);
+            break;
+        case STATE_TIMER_PROGRAM:
+            on_state_enter_timer_program(old_state, event);
+            break;
+        case STATE_TIMER_PROGRAM_BRIGHTNESS:
+            on_state_enter_timer_program_brightness(old_state, event);
+            break;
+        
         // ... weitere Cases
 
         default:
@@ -394,53 +415,51 @@ void state_machine_handle_button_event(state_machine_button_event_t event)
     {
         case STATE_OFF:
             if (event == BTN_EVENT_SINGLE_CLICK) {
-                state_machine_transition(STATE_TIMER_RUN);
+                state_machine_transition(STATE_TIMER_RUN, event);
             }
             else if (event == BTN_EVENT_LONG_CLICK) {
-                state_machine_transition(STATE_TIMER_ERASE);
-            }
-            break;
-            
-        case STATE_TIMER_RUN:
-            if (event == BTN_EVENT_SINGLE_CLICK) {
-                state_machine_transition(STATE_OFF);
-            }
-            else if (event == BTN_EVENT_DOUBLE_CLICK) {
-                if (led_brightness == 0) {
-                    state_machine_transition(STATE_TIMER_PROGRAM_ON);
-                }
-            }
-            else if (event == BTN_EVENT_HOLD) {
-                if (led_dim_direction == LED_DIM_DIRECTION_UP) {
-                    state_machine_transition(STATE_LED_DIM_UP);
-                } else {
-                    state_machine_transition(STATE_LED_DIM_DOWN);
-                }
+                state_machine_transition(STATE_OFF, event);
             }
             break;
 
-        case STATE_TIMER_PROGRAM_ON:
+        case STATE_TIMER_RUN:
             if (event == BTN_EVENT_SINGLE_CLICK) {
-                state_machine_transition(STATE_OFF);
+                state_machine_transition(STATE_OFF, event);
             }
             else if (event == BTN_EVENT_DOUBLE_CLICK) {
-                if (led_brightness > 0) {
-                    state_machine_transition(STATE_TIMER_RUN);
+                if (led_brightness == 0) {
+                    state_machine_transition(STATE_TIMER_PROGRAM, event);
                 }
             }
-            break;
-        /*
-        case STATE_TIMER_PROGRAM_OFF:
-            if (event == BTN_EVENT_SINGLE_CLICK) {
-                state_machine_transition(STATE_OFF);
+            else if (event == BTN_EVENT_LONG_CLICK) {  // re-adjust brightness of current timer
+                state_machine_transition(STATE_TIMER_RUN_BRIGHTNESS, event);
             }
             break;
-        */
-        case STATE_LED_DIM_UP:
-            if (event == BTN_EVENT_SINGLE_CLICK) {
-                state_machine_transition(STATE_STORE_BRIGHTNESS);
+
+        case STATE_TIMER_RUN_BRIGHTNESS:
+            if (event == BTN_EVENT_LONG_CLICK_END) {
+                state_machine_transition(STATE_TIMER_PROGRAM, event);
             }
-            // Release führt zurück zum vorherigen Zustand
+            break;
+
+        case STATE_TIMER_PROGRAM:
+            if (event == BTN_EVENT_SINGLE_CLICK) { // abort programming
+                state_machine_transition(STATE_OFF, event);
+            }
+            else if (event == BTN_EVENT_DOUBLE_CLICK) { // finish programming
+                if (led_brightness > 0) {
+                    state_machine_transition(STATE_TIMER_RUN, event);
+                }
+            }
+            else if (event == BTN_EVENT_LONG_CLICK) {  // re-adjust brightness of new timer
+                state_machine_transition(STATE_TIMER_PROGRAM_BRIGHTNESS, event);
+            }
+            break;
+
+        case STATE_TIMER_PROGRAM_BRIGHTNESS:
+            if (event == BTN_EVENT_LONG_CLICK_END) {
+                state_machine_transition(STATE_TIMER_PROGRAM, event);
+            }
             break;
             
         // ... weitere Zustandslogik
@@ -450,10 +469,19 @@ void state_machine_handle_button_event(state_machine_button_event_t event)
     }
 }
 
+// State-Exit Callbacks
+
+static void on_state_exit_off(state_machine_state_t from_state, state_machine_button_event_t event) {
+    if (event == BTN_EVENT_LONG_CLICK) {
+        ESP_LOGI(TAG, "All timers erased!");
+        led_blink(5, 250);
+    }
+}
+
 // State-Enter Callbacks
 
-static void on_state_enter_off(state_machine_state_t from_state) {
-    if (from_state == STATE_TIMER_PROGRAM_ON) {
+static void on_state_enter_off(state_machine_state_t from_state, state_machine_button_event_t event) {
+    if (from_state == STATE_TIMER_PROGRAM) {
         ESP_LOGI(TAG, "Timer programming ABORTED!");
         led_blink(5, 100);
         led_set_brightness(0);
@@ -464,34 +492,30 @@ static void on_state_enter_off(state_machine_state_t from_state) {
     }
 }
 
-static void on_state_enter_timer_run(state_machine_state_t from_state) {
-    if (from_state == STATE_TIMER_PROGRAM_ON) {
+static void on_state_enter_timer_run(state_machine_state_t from_state, state_machine_button_event_t event) {
+    if (from_state == STATE_TIMER_PROGRAM) {
         ESP_LOGI(TAG, "Timer programming COMPLETED!");
-        led_blink(3, 100);
+        led_blink(3, 250);
+        led_fade_off(2000);
     }
     else {
         ESP_LOGI(TAG, "Entering TIMER_RUN state");
+        led_blink(2, 500);
     }
 }
 
-static void on_state_enter_timer_program_on(state_machine_state_t from_state) {
+static void on_state_enter_timer_run_brightness(state_machine_state_t from_state, state_machine_button_event_t event) {
+    ESP_LOGI(TAG, "Entering DIM LED brightness state");
+}
+
+static void on_state_enter_timer_program(state_machine_state_t from_state, state_machine_button_event_t event) {
     ESP_LOGI(TAG, "Program TIMER START TIME");
-    led_fade_on(2000, 100);
     led_blink(3, 250);
+    led_fade_on(2000, 100);
 }
 
-static void on_state_enter_timer_program_off(state_machine_state_t from_state) {
-    ESP_LOGI(TAG, "Program TIMER STOP TIME");
-    led_fade_off(2000);
-}
-
-static void on_state_enter_timer_erase(state_machine_state_t from_state) {
-    ESP_LOGI(TAG, "All timers erased!");
-    led_blink(5, 250);
-}
-
-static void on_state_enter_dim_up(state_machine_state_t from_state) {
-    ESP_LOGI(TAG, "Entering LED_DIM_UP state");
+static void on_state_enter_timer_program_brightness(state_machine_state_t from_state, state_machine_button_event_t event) {
+    ESP_LOGI(TAG, "Entering DIM LED brightness state");
 }
 
 //-------------------------------------------------------------------------------//
@@ -510,18 +534,47 @@ void app_main(void)
     init_button();
     state_machine_init();
 
+    ESP_ERROR_CHECK(i2cdev_init());
+    i2c_dev_t dev;
+    memset(&dev, 0, sizeof(i2c_dev_t));
+    ESP_ERROR_CHECK(ds3231_init_desc(&dev, I2C_MASTER_NUM, I2C_MASTER_SDA_IO, I2C_MASTER_SCL_IO));
+
     // open NVS storage
     nvs_handle_t handle;
     nvs_open("storage", NVS_READWRITE, &handle);
-
+    
     // restore led brightness from flash
-    nvs_get_u8(handle, "led_brightness", &led_brightness);
+    //nvs_get_u8(handle, "led_brightness", &led_brightness);
+    led_set_brightness(0);
     //led_set_brightness(led_brightness);
     ESP_LOGI(TAG, "Restored LED brightness from Flash: %u", led_brightness);
 
-    led_set_brightness(0);
-    while(1) {
-       vTaskDelay(pdMS_TO_TICKS(1000));
+    // Prüfe ob Oszillator gestoppt war (z.B. durch leere Batterie)
+    bool stopped = false;
+    if (ds3231_get_oscillator_stop_flag(&dev, &stopped) == ESP_OK) {
+        if (stopped) {
+            ESP_LOGW(TAG, "Oszillator war gestoppt - Zeit muss neu gesetzt werden!");
+            ds3231_clear_oscillator_stop_flag(&dev);
+        }
+    }
+    struct tm rtctime;
+
+    while(1)
+    {
+       esp_err_t err = ds3231_get_time(&dev, &rtctime);
+       if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Zeit: %02d.%02d.%04d %02d:%02d:%02d",
+                     rtctime.tm_mday, 
+                     rtctime.tm_mon + 1,      // tm_mon ist 0-11
+                     rtctime.tm_year + 1900,  // tm_year ist Jahre seit 1900
+                     rtctime.tm_hour,
+                     rtctime.tm_min,
+                     rtctime.tm_sec);
+        } else {
+            ESP_LOGE(TAG, "Fehler beim Lesen: %s", esp_err_to_name(err));
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(60000));
     }
  
 /*
