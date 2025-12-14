@@ -3,3 +3,5 @@ dependencies:
     version: "^3.3.0"
   esp-idf-lib/ds3231:
     version: "^1.1.7"
+  nopnop2002/at24c:
+    git: https://github.com/nopnop2002/esp-idf-24c.git

@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <time.h>
 #include "driver/ledc.h" // LEDC driver
 #include "freertos/FreeRTOS.h" // used for pdMS_TO_TICKS
 #include "freertos/task.h" // used for vTaskDelay
@@ -35,6 +36,7 @@
 // Interrupt-Pin vom DS3231 SQW/INT
 #define DS3231_ALARM_INT_PIN GPIO_NUM_14
 
+#define MAX_TIMERS 8
 
 //-------------------------------------------------------------------------------//
 // declare types
@@ -61,6 +63,14 @@ typedef enum {
     BTN_EVENT_LONG_CLICK_END
 } state_machine_button_event_t;
 
+// Timer
+typedef struct {
+  uint8_t hour;        // 0-23
+  uint8_t minute;      // 0-59
+  uint8_t brightness;  // LED Helligkeitswert
+  bool active;        // Timer aktiv/inaktiv
+} led_timer_t;
+
 //-------------------------------------------------------------------------------//
 // global variables
 //-------------------------------------------------------------------------------//
@@ -82,6 +92,8 @@ static const char* state_names[] = {
 
 static TimerHandle_t reset_timer = NULL;
 static bool reset_confirmed = false;
+
+static led_timer_t timers[MAX_TIMERS];
 
 //-------------------------------------------------------------------------------//
 // declare functions
@@ -124,6 +136,18 @@ static void on_state_exit_reset(state_machine_state_t from_state, state_machine_
 static void ds3231_init_power_gpio(void);
 static void ds3231_power_on(void);
 static void ds3231_power_off(void);
+
+// Timer/Scheduler
+esp_err_t add_timer(const led_timer_t *timer);
+esp_err_t get_next_timer(const struct tm *now, led_timer_t *timer);
+esp_err_t get_previous_timer(const struct tm *now, led_timer_t *timer);
+esp_err_t set_ds3231_alarm(uint8_t hour, uint8_t minute);
+esp_err_t clear_ds3231_alarms(void);
+esp_err_t erase_all_timers(void);
+void print_timers(void);
+esp_err_t load_timers_from_eeprom(void);
+esp_err_t save_timers_to_eeprom(void);
+
 
 //-------------------------------------------------------------------------------//
 // LED functions
@@ -670,6 +694,312 @@ static void ds3231_configure_wakeup(void)
     //esp_sleep_enable_ext0_wakeup(DS3231_ALARM_INT_PIN, 0); // LOW = Alarm ausgelöst
     
     ESP_LOGI(TAG, "Wakeup auf GPIO %d (LOW) konfiguriert", DS3231_ALARM_INT_PIN);
+}
+
+
+//-------------------------------------------------------------------------------//
+// TIMER functions
+//-------------------------------------------------------------------------------//
+
+// Timer in EEPROM speichern
+esp_err_t save_timers_to_eeprom(void) {
+    esp_err_t ret;
+    
+    // Signatur schreiben
+    ret = WriteRom(&eeprom_dev, 0, EEPROM_SIGNATURE_1);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "EEPROM Write Fehler bei Adresse 0");
+        return ret;
+    }
+    
+    ret = WriteRom(&eeprom_dev, 1, EEPROM_SIGNATURE_2);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "EEPROM Write Fehler bei Adresse 1");
+        return ret;
+    }
+    
+    // Timer-Daten speichern (alle MAX_TIMERS Einträge)
+    uint16_t addr = 2;
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ret = WriteRom(&eeprom_dev, addr++, timers[i].hour);
+        if (ret != ESP_OK) return ret;
+        
+        ret = WriteRom(&eeprom_dev, addr++, timers[i].minute);
+        if (ret != ESP_OK) return ret;
+        
+        ret = WriteRom(&eeprom_dev, addr++, timers[i].brightness);
+        if (ret != ESP_OK) return ret;
+        
+        ret = WriteRom(&eeprom_dev, addr++, timers[i].active);
+        if (ret != ESP_OK) return ret;
+    }
+    
+    ESP_LOGI(TAG, "Timer in EEPROM gespeichert");
+    return ESP_OK;
+}
+
+// Timer aus EEPROM laden
+esp_err_t load_timers_from_eeprom(void) {
+    uint8_t sig1, sig2;
+    esp_err_t ret;
+    
+    // Signatur prüfen
+    ret = ReadRom(&eeprom_dev, 0, &sig1);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "EEPROM Read Fehler bei Adresse 0");
+        return ret;
+    }
+    
+    ret = ReadRom(&eeprom_dev, 1, &sig2);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "EEPROM Read Fehler bei Adresse 1");
+        return ret;
+    }
+    
+    if (sig1 != EEPROM_SIGNATURE_1 || sig2 != EEPROM_SIGNATURE_2) {
+        ESP_LOGW(TAG, "Keine gültigen Daten im EEPROM (Signatur: 0x%02X%02X)", sig1, sig2);
+        memset(timers, 0, sizeof(timers));
+        return ESP_ERR_NOT_FOUND;
+    }
+    
+    // Timer-Daten laden (alle MAX_TIMERS Einträge)
+    uint16_t addr = 2;
+    int count = 0;
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ret = ReadRom(&eeprom_dev, addr++, &timers[i].hour);
+        if (ret != ESP_OK) return ret;
+        
+        ret = ReadRom(&eeprom_dev, addr++, &timers[i].minute);
+        if (ret != ESP_OK) return ret;
+        
+        ret = ReadRom(&eeprom_dev, addr++, &timers[i].brightness);
+        if (ret != ESP_OK) return ret;
+        
+        ret = ReadRom(&eeprom_dev, addr++, &timers[i].active);
+        if (ret != ESP_OK) return ret;
+        
+        if (timers[i].active) count++;
+    }
+    
+    ESP_LOGI(TAG, "Timer aus EEPROM geladen: %d aktive Einträge", count);
+    return ESP_OK;
+}
+
+/**
+ * @brief Fügt einen neuen Timer hinzu
+ * 
+ * @param timer Zeiger auf Timer-Struktur
+ * @return esp_err_t
+ */
+esp_err_t add_timer(const led_timer_t *timer)
+{
+    if (timer == NULL) {
+        ESP_LOGE(TAG, "Timer-Pointer ist NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    if (timer->hour > 23 || timer->minute > 59) {
+        ESP_LOGE(TAG, "Invalid time %d:%d given!", timer->hour, timer->minute);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // Finde ersten freien Platz
+    int free_slot = -1;
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        if (!timers[i].active) {
+            free_slot = i;
+            break;
+        }
+    }
+    
+    if (free_slot == -1) {
+        ESP_LOGE(TAG, "Timer-Liste voll!");
+        return ESP_ERR_NO_MEM;
+    }
+    
+    // Timer kopieren
+    timers[free_slot] = *timer;
+    timers[free_slot].active = 1; // Sicherstellen dass er aktiv ist
+
+    // Nach Uhrzeit sortieren
+    //sort_timers();
+    
+    // In EEPROM speichern
+    //esp_err_t ret = save_timers_to_eeprom();
+    
+    ESP_LOGI(TAG, "Timer hinzugefügt: %02d:%02d, Helligkeit: %d", 
+             timer->hour, timer->minute, timer->brightness);
+    
+    return ESP_OK; //ret;
+}
+
+/**
+ * @brief Holt den nächsten Timer aus der Liste
+ * 
+ * @param now Zeiger auf aktuelle Zeitstruktur
+ * @param timer Zeiger auf Timer-Struktur zum Füllen
+ * @return esp_err_t
+ */
+esp_err_t get_next_timer(const struct tm *now, led_timer_t *timer)
+{
+    if (now == NULL || timer == NULL) {
+        ESP_LOGE(TAG, "NULL-Pointer übergeben");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    int now_minutes = time_to_minutes(now->tm_hour, now->tm_min);
+    int min_distance = 24 * 60; // Maximum mögliche Distanz
+    int next_index = -1;
+    
+    // Finde Timer mit kleinster Distanz vorwärts
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        if (!timers[i].active) continue;
+        
+        int timer_minutes = time_to_minutes(timers[i].hour, timers[i].minute);
+        int distance = minutes_until(now_minutes, timer_minutes);
+        
+        if (distance < min_distance) {
+            min_distance = distance;
+            next_index = i;
+        }
+    }
+    
+    if (next_index == -1) {
+        ESP_LOGW(TAG, "Kein aktiver Timer gefunden");
+        return ESP_ERR_NOT_FOUND;
+    }
+    
+    // Timer kopieren
+    *timer = timers[next_index];
+    
+    ESP_LOGI(TAG, "Nächster Timer: %02d:%02d (in %d Minuten), Helligkeit: %d",
+             timer->hour, timer->minute, min_distance, timer->brightness);
+    
+    return ESP_OK;
+}
+
+esp_err_t get_previous_timer(const struct tm *now, led_timer_t *timer)
+{
+    if (now == NULL || timer == NULL) {
+        ESP_LOGE(TAG, "NULL-Pointer übergeben");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    int now_minutes = time_to_minutes(now->tm_hour, now->tm_min);
+    int min_distance = 24 * 60; // Maximum mögliche Distanz
+    int prev_index = -1;
+    
+    // Finde Timer mit kleinster Distanz rückwärts
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        if (!timers[i].active) continue;
+        
+        int timer_minutes = time_to_minutes(timers[i].hour, timers[i].minute);
+        int distance = minutes_since(now_minutes, timer_minutes);
+        
+        if (distance < min_distance) {
+            min_distance = distance;
+            prev_index = i;
+        }
+    }
+    
+    if (prev_index == -1) {
+        ESP_LOGW(TAG, "Kein aktiver Timer gefunden");
+        return ESP_ERR_NOT_FOUND;
+    }
+    
+    // Timer kopieren
+    *timer = timers[prev_index];
+    
+    ESP_LOGI(TAG, "Vorheriger Timer: %02d:%02d (vor %d Minuten), Helligkeit: %d",
+             timer->hour, timer->minute, min_distance, timer->brightness);
+    
+    return ESP_OK;
+}
+
+// DS3231 Alarm setzen
+esp_err_t set_ds3231_alarm(uint8_t hour, uint8_t minute)
+{
+    uint8_t alarm_data[5] = {
+        0x07,                    // Startadresse: Alarm 1 Register
+        dec_to_bcd(minute),      // Minuten
+        dec_to_bcd(hour),        // Stunden
+        0x80,                    // Tag ignorieren (Bit 7 = 1)
+        0x80                     // Datum ignorieren (Bit 7 = 1)
+    };
+    
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (DS3231_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write(cmd, alarm_data, sizeof(alarm_data), true);
+    i2c_master_stop(cmd);
+    
+    esp_err_t ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(1000));
+    i2c_cmd_link_delete(cmd);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Fehler beim Setzen des DS3231 Alarms");
+        return ret;
+    }
+    
+    // Alarm aktivieren (Control Register)
+    uint8_t control_data[2] = {0x0E, 0x05}; // A1IE = 1, INTCN = 1
+    cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (DS3231_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write(cmd, control_data, sizeof(control_data), true);
+    i2c_master_stop(cmd);
+    
+    ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(1000));
+    i2c_cmd_link_delete(cmd);
+    
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    
+    // Alarm-Flag löschen (Status Register)
+    uint8_t status_data[2] = {0x0F, 0x00};
+    cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (DS3231_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write(cmd, status_data, sizeof(status_data), true);
+    i2c_master_stop(cmd);
+    
+    ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(1000));
+    i2c_cmd_link_delete(cmd);
+    
+    ESP_LOGI(TAG, "DS3231 Alarm gesetzt: %02d:%02d", hour, minute);
+    return ret;
+}
+
+// Alle Timer löschen
+esp_err_t clear_all_timers(void)
+{
+    memset(timers, 0, sizeof(timers));
+    
+    esp_err_t ret = save_timers_to_eeprom();
+    ESP_LOGI(TAG, "Alle Timer gelöscht");
+    return ret;
+}
+
+// Timer auflisten
+void print_timers(void)
+{
+    int count = 0;
+    for (int i = 0; i < MAX_TIMERS && timers[i].active; i++) {
+        count++;
+    }
+    
+    printf("\n=== Timer-Liste (%d/%d) ===\n", count, MAX_TIMERS);
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        if (!timers[i].active) continue;
+        
+        printf("%d: %02d:%02d -> Helligkeit: %3d\n",
+            i + 1,
+            timers[i].hour,
+            timers[i].minute,
+            timers[i].brightness);
+    }
+    printf("========================\n\n");
 }
 
 //-------------------------------------------------------------------------------//

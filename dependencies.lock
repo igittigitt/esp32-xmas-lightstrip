@@ -93,9 +93,18 @@ dependencies:
     source:
       type: idf
     version: 5.5.1
+  nopnop2002/at24c:
+    component_hash: a422ab0f3281342a6612407b3dc0d7d1c0662afe1fb427ce7bc16fc9407ed0b0
+    dependencies: []
+    source:
+      git: https://github.com/nopnop2002/esp-idf-24c.git
+      path: .
+      type: git
+    version: 7ea74bac878a87eb2cc74a4982a05d6bb3b215a4
 direct_dependencies:
 - esp-idf-lib/ds3231
 - espressif/button
-manifest_hash: 67ea6c325a96d57027b601e12652d3e7bf3c00203c3478a504e2ad339485cf01
+- nopnop2002/at24c
+manifest_hash: 293154d3c6b6e73d1dfc3793770d8d0075e406d147fda7215136d2bec1d47f18
 target: esp32h2
 version: 2.0.0
