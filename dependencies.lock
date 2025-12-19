@@ -51,7 +51,7 @@ dependencies:
       require: private
       version: '*'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     targets:
     - esp32
@@ -93,18 +93,10 @@ dependencies:
     source:
       type: idf
     version: 5.5.1
-  nopnop2002/at24c:
-    component_hash: a422ab0f3281342a6612407b3dc0d7d1c0662afe1fb427ce7bc16fc9407ed0b0
-    dependencies: []
-    source:
-      git: https://github.com/nopnop2002/esp-idf-24c.git
-      path: .
-      type: git
-    version: 7ea74bac878a87eb2cc74a4982a05d6bb3b215a4
 direct_dependencies:
 - esp-idf-lib/ds3231
+- esp-idf-lib/i2cdev
 - espressif/button
-- nopnop2002/at24c
-manifest_hash: 293154d3c6b6e73d1dfc3793770d8d0075e406d147fda7215136d2bec1d47f18
+manifest_hash: 82419907e8db056362065af44e766fe1889de611a587bac012909da88ef12a58
 target: esp32h2
 version: 2.0.0

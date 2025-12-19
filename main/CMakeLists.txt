@@ -2,8 +2,10 @@ idf_component_register(
     SRCS
         "main.c"
     INCLUDE_DIRS
-        "."
+        ""
    REQUIRES 
         esp_driver_ledc
-        nvs_flash
+        #nvs_flash
+        at24c
+        ds3231
 )
