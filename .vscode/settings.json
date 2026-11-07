@@ -6,6 +6,7 @@
     "board/esp32h2-builtin.cfg"
   ],
   "idf.portWin": "COM6",
+  "idf.monitorPort": "COM12",
   "idf.toolsPathWin": "C:\\Users\\muogeisen\\.espressif",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32h2"
@@ -16,5 +17,8 @@
     "--query-driver=C:\\Users\\muogeisen\\.espressif\\tools\\xtensa-esp-elf\\esp-14.2.0_20241119\\xtensa-esp-elf\\bin\\xtensa-esp32-elf-gcc.exe",
     "--compile-commands-dir=${workspaceFolder}\\build"
   ],
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "idf.customTask": "",
+  "idf.customTaskStatus": "ESP32 Monitor",
+  "idf.currentSetup": "C:\\Users\\muogeisen\\esp\\v5.5.1\\esp-idf"
 }

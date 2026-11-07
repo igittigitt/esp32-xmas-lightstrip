@@ -5,7 +5,9 @@ idf_component_register(
         ""
    REQUIRES 
         esp_driver_ledc
-        #nvs_flash
+        led_controller
         at24c
         ds3231
+        console
+        esp_timer
 )
